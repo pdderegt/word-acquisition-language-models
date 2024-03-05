@@ -94,7 +94,7 @@ def get_inflected_tokens(wordbank_tokens, inflections):
 
 def get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, tokenized_examples_file,
                          max_seq_len, min_seq_len, max_samples, bidirectional=True,
-                         inflections="none"):
+                         inflections="none", spm_tokenizer=True):
     # Each entry of token data is a tuple of token, token_id, masked_sample_sentences.
     token_data = []
     # Load words.
@@ -111,7 +111,8 @@ def get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, tokenized_exam
     wordbank_tokens = get_inflected_tokens(wordbank_tokens, inflections)
     # Get token ids.
     for token in wordbank_tokens:
-        token = "\u2581" + token # Add space before (for spm tokenizer).
+        if spm_tokenizer:
+            token = "\u2581" + token # Add space before (for spm tokenizer).
         token_id = tokenizer._convert_token_to_id_with_added_voc(token)
         if token_id != tokenizer.unk_token_id:
             token_data.append(tuple([token, token_id, []]))
