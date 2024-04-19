@@ -111,9 +111,19 @@ def get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, tokenized_exam
     wordbank_tokens = get_inflected_tokens(wordbank_tokens, inflections)
     # Get token ids.
     for token in wordbank_tokens:
+        # print("Token", token)
+        # print("With space:", tokenizer.encode(" "+ token))
+        # print("Without:", tokenizer.encode(token))
+        # print("Using convert:", tokenizer._convert_token_to_id_with_added_voc(token))
         if spm_tokenizer:
             token = "\u2581" + token # Add space before (for spm tokenizer).
-        token_id = tokenizer._convert_token_to_id_with_added_voc(token)
+            token_id = tokenizer._convert_token_to_id_with_added_voc(token)
+        else:
+            tokens = tokenizer.encode(" "+ token)
+            if len(tokens)==1:
+                token_id = tokens[0]
+            else:
+                token_id = tokenizer.unk_token_id
         if token_id != tokenizer.unk_token_id:
             token_data.append(tuple([token, token_id, []]))
     # Load sentences.
@@ -214,9 +224,11 @@ def run_model(model, model_type, examples, batch_size, tokenizer):
             if model_type == "bert" or model_type == "gpt2": # Transformers
                 outputs = model(input_ids=inputs["input_ids"],
                                 attention_mask=inputs["attention_mask"],
-                                labels=inputs["labels"],
+                                # labels=inputs["labels"],
                                 output_hidden_states=False, return_dict=True)
                 logits = outputs['logits'].detach()
+                del outputs
+                torch.cuda.empty_cache()
             else: # LSTMS.
                 outputs = model(inputs["input_ids"], inputs["labels"],
                                 hidden=None, loss_only=False)
