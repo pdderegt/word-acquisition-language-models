@@ -2,6 +2,7 @@ from word_evaluation import get_sample_sentences, evaluate_tokens
 import os
 from transformers import AutoConfig, AutoTokenizer,GPTNeoXForCausalLM
 from lm_utils import get_dataset
+from dataset_classes import DataCollatorForLanguageModeling
 import codecs
 import torch
 import argparse
@@ -48,13 +49,14 @@ def load_pythia_model(model_dir, step=143000, size="1b"):
     model = GPTNeoXForCausalLM.from_pretrained(
         "EleutherAI/pythia-"+size+"-deduped",
         revision="step"+ str(step),
-        cache_dir=model_dir+"./pythia-"+size+"-deduped/"+ str(step),
+        cache_dir=model_dir+"/pythia-"+size+"-deduped/"+ str(step),
     )
+    print(model_dir+"/pythia-"+size+"-deduped/"+ str(step))
 
     tokenizer = AutoTokenizer.from_pretrained(
         "EleutherAI/pythia-"+size+"-deduped",
         revision="step"+ str(step),
-        cache_dir=model_dir+"./pythia-"+size+"-deduped/"+ str(step),
+        cache_dir=model_dir+"/pythia-"+size+"-deduped/"+ str(step),
         padding=True
     )
     if tokenizer.pad_token is None:
@@ -70,9 +72,12 @@ def load_pythia_model(model_dir, step=143000, size="1b"):
 def main(args):
     # Get config file of Pythia tokenizer, located in snapshot folder in cached model
     # We arbitrarily pick the tokenizer of step 0, should be same for all training steps
+    step = 0
     size = args.model_size
     model_dir = args.model_dir
-    snapshot_dir = os.path.join(args.model_dir, "pythia-"+size+"-deduped","0","models--EleutherAI--pythia-"+size+"-deduped", "snapshots")
+    model, tokenizer = load_pythia_model(model_dir, size=size, step=step)
+    snapshot_dir = os.path.join(args.model_dir, "pythia-"+size+"-deduped",str(step),"models--EleutherAI--pythia-"+size+"-deduped", "snapshots")
+    print(os.listdir(os.path.join(args.model_dir, "pythia-"+size+"-deduped", str(step))))
     config_dir =  os.path.join(snapshot_dir, next(os.walk(snapshot_dir))[1][0])
     config_path = os.path.join(config_dir, "config.json")
     config = AutoConfig.from_pretrained(config_path)
@@ -84,14 +89,13 @@ def main(args):
     max_samples = args.max_samples
     bidirectional = False
     inflections = args.inflections
-    model, tokenizer = load_pythia_model(model_dir, size=size)
     token_data = get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, example_file, max_seq_len, min_seq_len, max_samples, bidirectional=bidirectional, inflections=inflections, spm_tokenizer=False)
      # Prepare for evaluation.
     output_file = args.output_file
     outfile = codecs.open(output_file, 'w', encoding='utf-8')
     # File header.
     if args.checkpoints is None or len(args.checkpoints) == 0:
-        checkpoints = PYTHIA_CHECKPTS[:20]
+        checkpoints = PYTHIA_CHECKPTS
     else:
         checkpoints = args.checkpoints
     checkpoints = list(checkpoints)
@@ -105,6 +109,83 @@ def main(args):
         evaluate_tokens(model, "gpt2", token_data, tokenizer, outfile,
                         checkpoint, batch_size, min_samples)
     outfile.close()
+
+def evaluate_tokens_pythia(model, token_data, tokenizer, outfile, checkpoint, batch_size, min_samples):
+    token_count = 0
+    for token, token_id, sample_sents in token_data:
+        print("\nEvaluation token: {}".format(token))
+        token_count += 1
+        print("{0} / {1} tokens".format(token_count, len(token_data)))
+        print("CHECKPOINT STEP: {}".format(checkpoint))
+        num_examples = len(sample_sents)
+        print("Num examples: {}".format(num_examples))
+        if num_examples < min_samples:
+            print("Not enough examples; skipped.")
+            continue
+        # Get logits with shape: num_examples x vocab_size.
+        logits = run_pythia(model, sample_sents, batch_size, tokenizer)
+        print("Finished inference.")
+        probs = torch.nn.Softmax(dim=-1)(logits)
+        # Get median rank of correct token
+        rankings = torch.argsort(probs, axis=-1, descending=True)
+        ranks = torch.nonzero(rankings == token_id) # Each output row is an index (sentence_i, token_rank).
+        ranks = ranks[:, 1] # For each example, only interested in the rank (not the sentence index).
+        median_rank = torch.median(ranks).item()
+        # Get accuracy
+        pred_tokens = torch.argmax(probs, dim=-1)
+        correct = pred_tokens == token_id
+        accuracy = torch.sum(correct) / correct.size()
+        # Get mean/stdev surprisal
+        token_probs = probs[:, token_id]
+        token_probs += 0.000000001 # Smooth with (1e-9).
+        surprisals = -1.0*torch.log2(token_probs)
+        mean_surprisal = torch.mean(surprisals).item()
+        std_surprisal = torch.std(surprisals).item()
+        # Logging.
+        print("Median rank: {}".format(median_rank))
+        print("Mean surprisal: {}".format(mean_surprisal))
+        print("Stdev surprisal: {}".format(std_surprisal))
+        print("Accuracy: {}".format(accuracy))
+        outfile.write("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\n".format(
+            checkpoint, token, median_rank, mean_surprisal, std_surprisal,
+            accuracy, num_examples))
+    return
+
+
+
+
+def run_pythia(model, sample_sents, batch_size, tokenizer):
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False, mlm_probability=0)
+    print(len(sample_sents))
+    dataset = data_collator(sample_sents)
+    print(dataset["input_ids"].shape)
+    inputs_loader = torch.utils.data.DataLoader(dataset["input_ids"], batch_size=batch_size, shuffle=False)
+    attention_loader = torch.utils.data.DataLoader(dataset["attention_mask"], batch_size=batch_size, shuffle=False)
+    label_loader = torch.utils.data.DataLoader(dataset["labels"], batch_size=batch_size, shuffle=False)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    with torch.no_grad():
+        eval_logits = []
+        attentions = iter(attention_loader)
+        labels = iter(label_loader)
+        for batch_input in inputs_loader:
+            batch_input = batch_input.to(device)
+            batch_attention = next(attentions).to(device)
+            batch_label = next(labels).to(device)
+            # inputs = prepare_tokenized_examples(batch, tokenizer, model_type)
+            outputs = model(input_ids=batch_input,
+                                attention_mask=batch_attention,
+                                labels=batch_label,
+                                output_hidden_states=False, return_dict=True)
+            logits = outputs['logits'].detach()
+            logits = logits[:, :-1, :] # All batches, remove last prediction, all vocab.
+            batch_label = batch_label[:, 1:] # Shift labels, as logit always concerns next word in sequence
+            target_indices = batch_label == tokenizer.mask_token_id
+            mask_logits = logits[:, target_indices]
+            eval_logits.append(mask_logits).detach().cpu()
+    all_eval_logits = torch.cat(eval_logits, dim=0)
+
+    return all_eval_logits
    
 
 if __name__ == "__main__":
