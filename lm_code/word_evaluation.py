@@ -5,6 +5,8 @@ certain tokens. See readme for sample usage.
 
 import logging
 import math
+import numpy as np
+import string
 import os
 import json
 import pickle
@@ -144,6 +146,16 @@ def get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, tokenized_exam
                 # This token already has enough sentences.
                 continue
             token_indices = [index for index, curr_id in enumerate(example) if curr_id == token_id]
+            are_sep_words = []
+            for token_index in token_indices:
+                next_token = tokenizer.decode(token_index+1)
+                is_sep_word = " " in next_token or "\u2581" in next_token or next_token in string.punctuation
+                if not is_sep_word:
+                    print("Invalid token at line",line_count, "token",token_index)
+                are_sep_words.append(is_sep_word)
+            # is_sep_word = [" " in tokenizer.decode(token_index+1) or "\u2581" in tokenizer.decode(token_index+1)
+            #                 or tokenizer.decode(token_index+1) in string.punctuation for token_index in token_indices]
+            token_indices = np.array(token_indices)[are_sep_words]
             # Warning: in bidirectional contexts, the mask can be in the first or last position,
             # which can cause no mask prediction to be made for the biLSTM.
             if not bidirectional:
