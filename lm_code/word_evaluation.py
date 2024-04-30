@@ -146,15 +146,20 @@ def get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, tokenized_exam
                 # This token already has enough sentences.
                 continue
             token_indices = [index for index, curr_id in enumerate(example) if curr_id == token_id]
+            # Check if token is a separate word:
             are_sep_words = []
             for token_index in token_indices:
-                next_token = tokenizer.decode(token_index+1)
+                if not token_index==len(example)-1:
+                    next_token = tokenizer.decode(example[token_index+1])
+                else: # Token is last word of example (possibly cut off by max_seq_length), so not clear if it would be a separate word
+                    next_token = "" 
+                # Check if next token is new word (thus contains space) or is a punctuation mark
                 is_sep_word = " " in next_token or "\u2581" in next_token or next_token in string.punctuation
-                if not is_sep_word:
-                    print("Invalid token at line",line_count, "token",token_index)
+                # if not is_sep_word:
+                #     print("Invalid token at line",line_count, "token",token)
+                #     print(tokenizer.decode([example[j] for j in range(max(0,token_index-10), min(token_index+10, len(example)))]))
                 are_sep_words.append(is_sep_word)
-            # is_sep_word = [" " in tokenizer.decode(token_index+1) or "\u2581" in tokenizer.decode(token_index+1)
-            #                 or tokenizer.decode(token_index+1) in string.punctuation for token_index in token_indices]
+            # Select only examples that are valid
             token_indices = np.array(token_indices)[are_sep_words]
             # Warning: in bidirectional contexts, the mask can be in the first or last position,
             # which can cause no mask prediction to be made for the biLSTM.
