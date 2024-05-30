@@ -36,9 +36,6 @@ def create_parser():
     # The minimum sequence length to evaluate a token in a sentence.
     # For unidirectional models, this only counts context before the target token.
     parser.add_argument('--min_seq_len', type=int, default=8)
-    # Load token data (sample sentences for each token) from file.
-    # If file does not exist, saves the token data to this file.
-    parser.add_argument('--save_samples', default="")
     # Whether to include token inflections (all, only, or none).
     parser.add_argument('--inflections', default="none")
     return parser
@@ -95,6 +92,9 @@ def main(args):
     else:
         with open(token_data, "r") as f:
             token_data = json.load(f)
+        for token, token_id, sample_sents in token_data:
+            print("For token", token, "there were", len(sample_sents), "examples found.")
+
      # Prepare for evaluation.
     outdir = args.output_dir
     # File header.
@@ -119,6 +119,8 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outdir, checkpoint, bat
     token_count = 0
     for token, token_id, sample_sents in token_data:
         token_dir = os.path.join(outdir, token)
+        if not os.path.exists(token_dir):
+            os.mkdir(token_dir)
         print("\nEvaluation token: {}".format(token))
         token_count += 1
         print("{0} / {1} tokens".format(token_count, len(token_data)))
@@ -137,23 +139,22 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outdir, checkpoint, bat
         ranks = torch.nonzero(rankings == token_id) # Each output row is an index (sentence_i, token_rank).
         ranks = ranks[:, 1] # For each example, only interested in the rank (not the sentence index).
         rank_file = os.path.join(token_dir, "ranks.txt")
-        with open(rank_file, "wb") as f:
+        with open(rank_file, "a") as f:
             for rank in ranks:
-                f.write(rank.item()+"\t")
+                f.write(str(rank.item())+"\t")
             f.write("\n")
         median_rank = torch.median(ranks).item()
         # Get accuracy
-        pred_tokens = torch.argmax(probs, dim=-1)
-        correct = pred_tokens == token_id
-        accuracy = torch.sum(correct) / correct.size()
+        pred_tokens = rankings[:, 0]
+        accuracy = torch.mean((pred_tokens == token_id).float()).item()
         # Get mean/stdev surprisal
         token_probs = probs[:, token_id]
         token_probs += 0.000000001 # Smooth with (1e-9).
         surprisals = -1.0*torch.log2(token_probs)
         surprisals_file = os.path.join(token_dir, "surprisals.txt")
-        with open(surprisals_file, "wb") as f:
+        with open(surprisals_file, "a") as f:
             for surprisal in surprisals:
-                f.write(surprisal.item()+"\t")
+                f.write(str(surprisal.item())+"\t")
             f.write("\n")
         mean_surprisal = torch.mean(surprisals).item()
         std_surprisal = torch.std(surprisals).item()
@@ -162,7 +163,7 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outdir, checkpoint, bat
         print("Mean surprisal: {}".format(mean_surprisal))
         print("Stdev surprisal: {}".format(std_surprisal))
         print("Accuracy: {}".format(accuracy))
-        with open(summary_file, "wb") as f:
+        with open(summary_file, "a") as f:
             f.write("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\n".format(
             checkpoint, token, median_rank, mean_surprisal, std_surprisal,
             accuracy, num_examples))
