@@ -1,15 +1,13 @@
-from word_evaluation import get_sample_sentences, evaluate_tokens
+from word_evaluation import get_sample_sentences, run_model
 import os
 from transformers import AutoConfig, AutoTokenizer,GPTNeoXForCausalLM
-from lm_utils import get_dataset
-from dataset_classes import DataCollatorForLanguageModeling
-import codecs
 import torch
 import argparse
+import json
 
 MAX_STORED_LINE_COUNT = 10000
-DATA_DIR = "C:/Users/pdder/ThesisData" # Where the models are cached
-CODE_DIR = "C:/Users/pdder/OneDrive/Documents/Master/Artificial Intelligence/Thesis/Code/word-acquisition-language-models"
+# DATA_DIR = "C:/Users/pdder/ThesisData" # Where the models are cached
+# CODE_DIR = "C:/Users/pdder/OneDrive/Documents/Master/Artificial Intelligence/Thesis/Code/word-acquisition-language-models"
 PYTHIA_CHECKPTS = [0]+[2**i for i in range(10)] + [1000*i for i in range(1,144)] 
 
 
@@ -18,8 +16,8 @@ def create_parser():
     # Directory where Pythia models and tokenizers are cached.
     parser.add_argument('--model_dir', default="")
     # Size of Pythia model to evaluate on, must be one of Pythia's available sizes (14m, 31m, 70m, 160m, 410m, 1b, 1.4b, 2.8b, 6.9b, 12b).
-    parser.add_argument('--model_size', type=str,  default="70m")
-    parser.add_argument('--output_file', default="./sample_data/pythia_surprisals.txt")
+    parser.add_argument('--model_size', type=str,  default="160m")
+    parser.add_argument('--output_dir', default="./sample_data/eval")
     # If empty, uses all Pythia checkpoints.
     # If specified, must be subset of Pythia checkpoints available.
     parser.add_argument('--checkpoints', type=int, nargs='*')
@@ -30,6 +28,8 @@ def create_parser():
     # Examples should already be tokenized. Each line should be a
     # space-separated list of integer token ids.
     parser.add_argument('--examples_file', default="./sample_data/eval_tokenized.txt")
+    # Token_data if this is already computed beforehand, saves computation
+    parser.add_argument('--token_data', default=None)
     # The minimum number of sample sentences to evaluate a token.
     parser.add_argument('--min_samples', type=int, default=8)
     parser.add_argument('--max_samples', type=int, default=512)
@@ -89,10 +89,14 @@ def main(args):
     max_samples = args.max_samples
     bidirectional = False
     inflections = args.inflections
-    token_data = get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, example_file, max_seq_len, min_seq_len, max_samples, bidirectional=bidirectional, inflections=inflections, spm_tokenizer=False)
+    token_data = args.token_data
+    if token_data is None:
+        token_data = get_sample_sentences(tokenizer, wordbank_file, wordbank_lang, example_file, max_seq_len, min_seq_len, max_samples, bidirectional=bidirectional, inflections=inflections, spm_tokenizer=False)
+    else:
+        with open(token_data, "r") as f:
+            token_data = json.load(f)
      # Prepare for evaluation.
-    output_file = args.output_file
-    outfile = codecs.open(output_file, 'w', encoding='utf-8')
+    outdir = args.output_dir
     # File header.
     if args.checkpoints is None or len(args.checkpoints) == 0:
         checkpoints = PYTHIA_CHECKPTS
@@ -106,13 +110,15 @@ def main(args):
     for checkpoint in checkpoints:
         print("CHECKPOINT STEPS: {}".format(checkpoint))
         model, tokenizer = load_pythia_model(model_dir, step=checkpoint, size=size)
-        evaluate_tokens(model, "gpt2", token_data, tokenizer, outfile,
+        evaluate_tokens_pythia(model, token_data, tokenizer, outdir,
                         checkpoint, batch_size, min_samples)
-    outfile.close()
 
-def evaluate_tokens_pythia(model, token_data, tokenizer, outfile, checkpoint, batch_size, min_samples):
+def evaluate_tokens_pythia(model, token_data, tokenizer, outdir, checkpoint, batch_size, min_samples):
+    summary_file = os.path.join(outdir, "summary.txt")
+
     token_count = 0
     for token, token_id, sample_sents in token_data:
+        token_dir = os.path.join(outdir, token)
         print("\nEvaluation token: {}".format(token))
         token_count += 1
         print("{0} / {1} tokens".format(token_count, len(token_data)))
@@ -130,6 +136,11 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outfile, checkpoint, ba
         rankings = torch.argsort(probs, axis=-1, descending=True)
         ranks = torch.nonzero(rankings == token_id) # Each output row is an index (sentence_i, token_rank).
         ranks = ranks[:, 1] # For each example, only interested in the rank (not the sentence index).
+        rank_file = os.path.join(token_dir, "ranks.txt")
+        with open(rank_file, "wb") as f:
+            for rank in ranks:
+                f.write(rank.item()+"\t")
+            f.write("\n")
         median_rank = torch.median(ranks).item()
         # Get accuracy
         pred_tokens = torch.argmax(probs, dim=-1)
@@ -139,6 +150,11 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outfile, checkpoint, ba
         token_probs = probs[:, token_id]
         token_probs += 0.000000001 # Smooth with (1e-9).
         surprisals = -1.0*torch.log2(token_probs)
+        surprisals_file = os.path.join(token_dir, "surprisals.txt")
+        with open(surprisals_file, "wb") as f:
+            for surprisal in surprisals:
+                f.write(surprisal.item()+"\t")
+            f.write("\n")
         mean_surprisal = torch.mean(surprisals).item()
         std_surprisal = torch.std(surprisals).item()
         # Logging.
@@ -146,7 +162,8 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outfile, checkpoint, ba
         print("Mean surprisal: {}".format(mean_surprisal))
         print("Stdev surprisal: {}".format(std_surprisal))
         print("Accuracy: {}".format(accuracy))
-        outfile.write("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\n".format(
+        with open(summary_file, "wb") as f:
+            f.write("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\n".format(
             checkpoint, token, median_rank, mean_surprisal, std_surprisal,
             accuracy, num_examples))
     return
@@ -155,38 +172,7 @@ def evaluate_tokens_pythia(model, token_data, tokenizer, outfile, checkpoint, ba
 
 
 def run_pythia(model, sample_sents, batch_size, tokenizer):
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False, mlm_probability=0)
-    print(len(sample_sents))
-    dataset = data_collator(sample_sents)
-    print(dataset["input_ids"].shape)
-    inputs_loader = torch.utils.data.DataLoader(dataset["input_ids"], batch_size=batch_size, shuffle=False)
-    attention_loader = torch.utils.data.DataLoader(dataset["attention_mask"], batch_size=batch_size, shuffle=False)
-    label_loader = torch.utils.data.DataLoader(dataset["labels"], batch_size=batch_size, shuffle=False)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.eval()
-    with torch.no_grad():
-        eval_logits = []
-        attentions = iter(attention_loader)
-        labels = iter(label_loader)
-        for batch_input in inputs_loader:
-            batch_input = batch_input.to(device)
-            batch_attention = next(attentions).to(device)
-            batch_label = next(labels).to(device)
-            # inputs = prepare_tokenized_examples(batch, tokenizer, model_type)
-            outputs = model(input_ids=batch_input,
-                                attention_mask=batch_attention,
-                                labels=batch_label,
-                                output_hidden_states=False, return_dict=True)
-            logits = outputs['logits'].detach()
-            logits = logits[:, :-1, :] # All batches, remove last prediction, all vocab.
-            batch_label = batch_label[:, 1:] # Shift labels, as logit always concerns next word in sequence
-            target_indices = batch_label == tokenizer.mask_token_id
-            mask_logits = logits[:, target_indices]
-            eval_logits.append(mask_logits).detach().cpu()
-    all_eval_logits = torch.cat(eval_logits, dim=0)
-
-    return all_eval_logits
-   
+    return run_model(model, "gpt2", sample_sents, batch_size, tokenizer)
 
 if __name__ == "__main__":
     parser = create_parser()
